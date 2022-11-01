@@ -9,6 +9,25 @@ import sqlite3
 
 
 def setup(bot):
+    with sqlite3.connect("tictactoe.db") as db:
+        cursor = db.cursor()
+        cursor.execute("CREATE TABLE IF NOT EXISTS pvp_scoreboard (account_id INTEGER NOT NULL UNIQUE, wins INTEGER, "
+                       "losses INTEGER, ties INTEGER)")
+        cursor.execute("CREATE TABLE IF NOT EXISTS bot_scoreboard (account_id INTEGER NOT NULL UNIQUE, wins INTEGER, "
+                       "losses INTEGER, ties INTEGER)")
+        db.commit()
+        cursor.close()
+    update_user_data(107596289030, 0, 0, 0, "pvp_scoreboard")
+    # get size of all tables in database
+    with sqlite3.connect("tictactoe.db") as db:
+        cursor = db.cursor()
+        cursor.execute("SELECT COUNT(*) FROM pvp_scoreboard")
+        pvp_size = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM bot_scoreboard")
+        bot_size = cursor.fetchone()[0]
+        cursor.close()
+    print("PvP scoreboard size: " + str(pvp_size))
+    print("Bot scoreboard size: " + str(bot_size))
     bot.add_cog(TicTacToe(bot))
 
 
@@ -43,6 +62,53 @@ def magic_square_test(magic_square):
     return True
 
 
+def get_user_stats(userid: int, table: str):
+    try:
+        with sqlite3.connect("tictactoe.db") as db:
+            cursor = db.cursor()
+            cursor.execute(f"SELECT wins, losses, ties FROM {table} WHERE account_id = ?;", (userid,))
+            return True, cursor.fetchone()
+    except sqlite3.Error as e:
+        return False, e
+
+
+def update_user_data(userid: int, wins: int, losses: int, ties: int, table: str):
+    with sqlite3.connect("tictactoe.db") as db:
+        try:
+            print("Updating user data...")
+            cursor = db.cursor()
+            # if this failed, then the user does not exist in the database
+            try:
+                print("Updating user data...")
+                cursor.execute(f"""UPDATE {table}
+                SET wins = ?, losses = ?, ties = ?
+                WHERE account_id = ?""",
+                               (wins, losses, ties, userid))
+            except sqlite3.OperationalError:
+                print("User does not exist in database, creating new entry...")
+                cursor.execute(f"""INSERT 
+                INTO {table} (account_id, wins, losses, ties)
+                VALUES (?, ?, ?, ?)""",
+                               (userid, wins, losses, ties))
+            db.commit()
+            print(f"Successfully updated user data for {userid}. ({wins}, {losses}, {ties}) in {table}")
+            return True, None
+        except sqlite3.Error as e:
+            return False, e
+        finally:
+            cursor.close()
+
+
+def does_user_exist(userid: int, table: str):
+    try:
+        with sqlite3.connect("tictactoe.db") as db:
+            cursor = db.cursor()
+            cursor.execute(f"SELECT * FROM {table} WHERE account_id = ?;", (userid,))
+            return True, True if cursor.fetchone() else False
+    except sqlite3.Error as e:
+        return False, e
+
+
 class TicTacToe(commands.Cog, name="TicTacToe Game"):
     def __init__(self, bot):
         self.game_message_id = None
@@ -72,27 +138,28 @@ class TicTacToe(commands.Cog, name="TicTacToe Game"):
             # use emojis to get player2 consent to play
             self.player1 = ctx.author
             self.player2 = player2
-            await ctx.respond("Waiting for player2 to accept...", delete_after=30, ephemeral=True)
+            await ctx.respond(f"Waiting for {player2.name} to accept...", delete_after=30, ephemeral=True)
             message = await ctx.channel.send(f"{player2.mention} do you accept this challenge?", delete_after=30)
             await message.add_reaction("✅")
             await message.add_reaction("❌")
             try:
                 reaction, user = await self.bot.wait_for("reaction_add", check=self.check_p2_check, timeout=30)
-            except asyncio.TimeoutError:  # That way the bot doesn't wait forever for a reaction
+            except asyncio.TimeoutError:
                 await message.channel.send("Game stopped due to inactivity.", delete_after=10)
                 return
             if reaction:
-                # delete previous message
                 await message.delete()
                 if str(reaction) == "✅":
                     self.turn = random.choice([1, 2])
-                    self.game_message_id = await ctx.send(f"Starting game between {self.player1.name} and {self.player2.name}!")
+                    self.game_message_id = await ctx.send(
+                        f"Starting game between {self.player1.name} and {self.player2.name}!")
                     await self.add_emoijs()
                     await self.update_board()
                     while True:
                         if self.turn == 1:
                             try:
-                                reaction, user = await self.bot.wait_for("reaction_add", check=self.check_p1_turn, timeout=30)
+                                reaction, user = await self.bot.wait_for("reaction_add", check=self.check_p1_turn,
+                                                                         timeout=30)
                             except asyncio.TimeoutError:
                                 await ctx.send("Game stopped due to inactivity.", delete_after=10)
                                 await self.game_message_id.delete()
@@ -106,6 +173,26 @@ class TicTacToe(commands.Cog, name="TicTacToe Game"):
                                 if self.check_win() == 1:
                                     await self.game_message_id.edit(f"🎉* {self.player1.name} (Player 1) won!*🎉",
                                                                     delete_after=15)
+                                    # check if the user is playing themselves
+                                    if self.player1.id != self.player2.id:
+                                        # update player1 stats
+                                        if get_user_stats(self.player1.id, "pvp_scoreboard")[1] is not None:
+                                            success, result = get_user_stats(self.player1.id, "pvp_scoreboard")
+                                            if success:
+                                                wins, losses, ties = result
+                                                wins += 1
+                                                update_user_data(self.player1.id, wins, losses, ties, "pvp_scoreboard")
+                                        else:
+                                            update_user_data(self.player1.id, 1, 0, 0, "pvp_scoreboard")
+                                        # update player2 stats
+                                        if get_user_stats(self.player2.id, "pvp_scoreboard")[1] is not None:
+                                            success, result = get_user_stats(self.player2.id, "pvp_scoreboard")
+                                            if success:
+                                                wins, losses, ties = result
+                                                losses += 1
+                                                update_user_data(self.player2.id, wins, losses, ties, "pvp_scoreboard")
+                                        else:
+                                            update_user_data(self.player2.id, 0, 1, 0, "pvp_scoreboard")
                                     await self.game_message_id.clear_reactions()
                                     self.game_message_id = None
                                     self.board = ["0", "0", "0", "0", "0", "0", "0", "0", "0"]
@@ -113,6 +200,26 @@ class TicTacToe(commands.Cog, name="TicTacToe Game"):
                                 elif self.check_win() == -1:
                                     await self.game_message_id.edit(f"🎉* Nice Draw!*🎉",
                                                                     delete_after=15)
+                                    # check if the user is playing themselves
+                                    if self.player1.id != self.player2.id:
+                                        # update player1 stats
+                                        if get_user_stats(self.player1.id, "pvp_scoreboard")[1] is not None:
+                                            success, result = get_user_stats(self.player1.id, "pvp_scoreboard")
+                                            if success:
+                                                wins, losses, ties = result
+                                                ties += 1
+                                                update_user_data(self.player1.id, wins, losses, ties, "pvp_scoreboard")
+                                        else:
+                                            update_user_data(self.player1.id, 0, 0, 1, "pvp_scoreboard")
+                                        # update player2 stats
+                                        if get_user_stats(self.player2.id, "pvp_scoreboard")[1] is not None:
+                                            success, result = get_user_stats(self.player2.id, "pvp_scoreboard")
+                                            if success:
+                                                wins, losses, ties = result
+                                                ties += 1
+                                                update_user_data(self.player2.id, wins, losses, ties, "pvp_scoreboard")
+                                        else:
+                                            update_user_data(self.player2.id, 0, 0, 1, "pvp_scoreboard")
                                     await self.game_message_id.clear_reactions()
                                     self.game_message_id = None
                                     self.board = ["0", "0", "0", "0", "0", "0", "0", "0", "0"]
@@ -121,7 +228,8 @@ class TicTacToe(commands.Cog, name="TicTacToe Game"):
                             await self.game_message_id.add_reaction(reaction)
                         elif self.turn == 2:
                             try:
-                                reaction, user = await self.bot.wait_for("reaction_add", check=self.check_p2_turn, timeout=30)
+                                reaction, user = await self.bot.wait_for("reaction_add", check=self.check_p2_turn,
+                                                                         timeout=30)
                             except asyncio.TimeoutError:
                                 await ctx.send("Game stopped due to inactivity.", delete_after=10)
                                 await self.game_message_id.delete()
@@ -135,6 +243,26 @@ class TicTacToe(commands.Cog, name="TicTacToe Game"):
                                 if self.check_win() == 2:
                                     await self.game_message_id.edit(f"🎉* {self.player2.name} (Player 2) won!*🎉",
                                                                     delete_after=15)
+                                    # check if the user is playing themselves
+                                    if self.player1.id != self.player2.id:
+                                        # update player1 stats
+                                        if get_user_stats(self.player1.id, "pvp_scoreboard")[1] is not None:
+                                            success, result = get_user_stats(self.player1.id, "pvp_scoreboard")
+                                            if success:
+                                                wins, losses, ties = result
+                                                losses += 1
+                                                update_user_data(self.player1.id, wins, losses, ties, "pvp_scoreboard")
+                                        else:
+                                            update_user_data(self.player1.id, 0, 1, 0, "pvp_scoreboard")
+                                        # update player2 stats
+                                        if get_user_stats(self.player2.id, "pvp_scoreboard")[1] is not None:
+                                            success, result = get_user_stats(self.player2.id, "pvp_scoreboard")
+                                            if success:
+                                                wins, losses, ties = result
+                                                wins += 1
+                                                update_user_data(self.player2.id, wins, losses, ties, "pvp_scoreboard")
+                                        else:
+                                            update_user_data(self.player2.id, 1, 0, 0, "pvp_scoreboard")
                                     await self.game_message_id.clear_reactions()
                                     self.game_message_id = None
                                     self.board = ["0", "0", "0", "0", "0", "0", "0", "0", "0"]
@@ -142,6 +270,26 @@ class TicTacToe(commands.Cog, name="TicTacToe Game"):
                                 elif self.check_win() == -1:
                                     await self.game_message_id.edit(f"🎉* Nice Draw!*🎉",
                                                                     delete_after=15)
+                                    # check if the user is playing themselves
+                                    if self.player1.id != self.player2.id:
+                                        # update player1 stats
+                                        if get_user_stats(self.player1.id, "pvp_scoreboard")[1] is not None:
+                                            success, result = get_user_stats(self.player1.id, "pvp_scoreboard")
+                                            if success:
+                                                wins, losses, ties = result
+                                                ties += 1
+                                                update_user_data(self.player1.id, wins, losses, ties, "pvp_scoreboard")
+                                        else:
+                                            update_user_data(self.player1.id, 0, 0, 1, "pvp_scoreboard")
+                                        # update player2 stats
+                                        if get_user_stats(self.player2.id, "pvp_scoreboard")[1] is not None:
+                                            success, result = get_user_stats(self.player2.id, "pvp_scoreboard")
+                                            if success:
+                                                wins, losses, ties = result
+                                                ties += 1
+                                                update_user_data(self.player2.id, wins, losses, ties, "pvp_scoreboard")
+                                        else:
+                                            update_user_data(self.player2.id, 0, 0, 1, "pvp_scoreboard")
                                     await self.game_message_id.clear_reactions()
                                     self.game_message_id = None
                                     self.board = ["0", "0", "0", "0", "0", "0", "0", "0", "0"]
@@ -188,6 +336,14 @@ class TicTacToe(commands.Cog, name="TicTacToe Game"):
                         if self.check_win() == 1:
                             await self.game_message_id.edit(f"🎉* {self.player1.name} (Player 1) won!*🎉",
                                                             delete_after=15)
+                            if does_user_exist(self.player1.id, "bot_scoreboard")[1] is not None:
+                                success, result = get_user_stats(self.player1.id, "bot_scoreboard")
+                                if success:
+                                    wins, losses, ties = result
+                                    wins += 1
+                                    update_user_data(self.player1.id, wins, losses, ties, "bot_scoreboard")
+                            else:
+                                update_user_data(self.player1.id, 1, 0, 0, "bot_scoreboard")
                             await self.game_message_id.clear_reactions()
                             self.game_message_id = None
                             self.board = ["0", "0", "0", "0", "0", "0", "0", "0", "0"]
@@ -195,6 +351,16 @@ class TicTacToe(commands.Cog, name="TicTacToe Game"):
                         elif self.check_win() == -1:
                             await self.game_message_id.edit(f"🎉* Nice Draw!*🎉",
                                                             delete_after=15)
+                            if self.player1.id != self.player2:
+                                # update player1 stats
+                                if get_user_stats(self.player1.id, "bot_scoreboard")[1] is not None:
+                                    success, result = get_user_stats(self.player1.id, "bot_scoreboard")
+                                    if success:
+                                        wins, losses, ties = result
+                                        ties += 1
+                                        update_user_data(self.player1.id, wins, losses, ties, "bot_scoreboard")
+                                else:
+                                    update_user_data(self.player1.id, 0, 0, 1, "bot_scoreboard")
                             await self.game_message_id.clear_reactions()
                             self.game_message_id = None
                             self.board = ["0", "0", "0", "0", "0", "0", "0", "0", "0"]
@@ -216,6 +382,16 @@ class TicTacToe(commands.Cog, name="TicTacToe Game"):
                     elif self.check_win() == -1:
                         await self.game_message_id.edit(f"🎉* Nice Draw!*🎉",
                                                         delete_after=15)
+                        if self.player1.id != self.player2:
+                            # update player1 stats
+                            if get_user_stats(self.player1.id, "bot_scoreboard")[1] is not None:
+                                success, result = get_user_stats(self.player1.id, "bot_scoreboard")
+                                if success:
+                                    wins, losses, ties = result
+                                    ties += 1
+                                    update_user_data(self.player1.id, wins, losses, ties, "bot_scoreboard")
+                            else:
+                                update_user_data(self.player1.id, 0, 0, 1, "bot_scoreboard")
                         await self.game_message_id.clear_reactions()
                         self.game_message_id = None
                         self.board = ["0", "0", "0", "0", "0", "0", "0", "0", "0"]
@@ -223,7 +399,7 @@ class TicTacToe(commands.Cog, name="TicTacToe Game"):
 
     async def ai_turn(self):
         bias = random.choice([0, 1])
-        if bias == 0: # prefer to win
+        if bias == 0:  # prefer to win
             if not self.check_near_win(2, 2) is None:
                 index = self.check_near_win(2, 2)
                 if self.check_ai_colision(index):
@@ -242,7 +418,7 @@ class TicTacToe(commands.Cog, name="TicTacToe Game"):
                 else:
                     self.board[random.choice(self.get_empty_positions())] = "2"
                     return
-        if bias == 1: # prefer to block
+        if bias == 1:  # prefer to block
             if not self.check_near_win(2, 1) is None:
                 index = self.check_near_win(2, 1)
                 if self.check_ai_colision(index):
@@ -299,10 +475,12 @@ class TicTacToe(commands.Cog, name="TicTacToe Game"):
             await self.game_message_id.add_reaction(x)
 
     def check_p1_turn(self, reaction, user):
-        return str(user) == str(self.player1) and str(reaction) in ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣"]
+        return str(user) == str(self.player1) and str(reaction) in ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣",
+                                                                    "8️⃣", "9️⃣"]
 
     def check_p2_turn(self, reaction, user):
-        return str(user) == str(self.player2) and str(reaction) in ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣"]
+        return str(user) == str(self.player2) and str(reaction) in ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣",
+                                                                    "8️⃣", "9️⃣"]
 
     def check_p2_check(self, reaction, user):
         return str(user) == str(self.player2) and str(reaction.emoji) == str(reaction)
@@ -340,8 +518,3 @@ class TicTacToe(commands.Cog, name="TicTacToe Game"):
         for z in self.winning_positions:
             if len(set(z) & set(positions)) == amount:
                 return list(set(z) - set(positions))[0]
-
-    def update_user_data(self, user, wins, losses, ties):
-        with sqlite3.connect("database.db") as db:
-            cursor = db.cursor()
-            cursor.execute("UPDATE user_data SET wins = ?, losses = ?, ties = ? WHERE user_id = ?", (wins, losses, ties, user.id))

@@ -1,4 +1,5 @@
 # using pycord make a bot that plays tictactoe
+import sqlite3
 
 import discord
 from discord import SlashCommand
